@@ -1,8 +1,0 @@
-reports/
-cache.json
-config.json
-*.exe
-build/
-dist/
-__pycache__/
-*.spec

@@ -959,10 +959,10 @@ class _Session:
 
 
 def _wh_dates(today=None):
-    """From = the 26th that started the current cycle, To = yesterday (on the 26th itself: today). e.g. 14 Nov -> 26 Oct .. 13 Nov, 26 Nov -> 26 Nov .. 26 Nov."""
+    """From = the 26th that started the current cycle, To = TODAY (the present day, every download), e.g. 14 Nov -> 26 Oct .. 14 Nov, 26 Nov -> 26 Nov .. 26 Nov."""
     t = (today or datetime.now()).date()
     start = t.replace(day=CYCLE_DAY) if t.day >= CYCLE_DAY else (t.replace(day=1) - timedelta(days=1)).replace(day=CYCLE_DAY)
-    return start, max(t - timedelta(days=1), start)
+    return start, t
 
 
 def _debug(page, why):
@@ -1014,6 +1014,12 @@ def download_report(kind, ses=None):
                 n, ov = _option(form, f'ddl_{pre}{suf}', want=val)
                 if n is None or ov is None:
                     raise ValueError(f'{pre}{suf} {val} not in the list')
+                over[n] = ov
+    else:                                                          # LB: always the present month / year, never the date the page was saved with
+        now = datetime.now()
+        for suf, val in (('Month', now.month), ('Year', now.year)):
+            n, ov = _option(form, f'ddl_F{suf}', want=val)
+            if n and ov is not None:
                 over[n] = ov
     btn = _name(form, 'pb_getreport')
     hd, body = ses.go(action, _payload(form, over, btn))           # 4) Get Report

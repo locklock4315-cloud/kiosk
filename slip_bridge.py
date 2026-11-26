@@ -940,7 +940,7 @@ class _Session:
     def go(self, url, fields=None):
         """GET (fields=None) or POST; returns (headers, body bytes). Redirects are followed; self.url = final address."""
         data = urllib.parse.urlencode(fields).encode('utf-8') if fields is not None else None
-        with self.op.open(urllib.request.Request(url, data=data), timeout=90) as r:
+        with self.op.open(urllib.request.Request(url, data=data), timeout=300) as r:                 # the Leave Balance report can take minutes to start
             self.url, body, hd = r.geturl(), r.read(), r.headers
         ctype = hd.get('Content-Type', '').lower()
         disp = hd.get('Content-Disposition', '').lower()
@@ -1429,7 +1429,10 @@ def slip(uid, ts):
     e, L = DATA.get(uid), '-' * COLS
     if not e:
         return None
-    rows = e['att'][-max(DAYS, min(SPAN[0], MAX_SPAN)):]
+    day = f'{datetime.now():%Y-%m-%d}'
+    past = [a for a in e['att'] if len(a) <= 8 or a[8] < day                                     # coming days of the report are never on the slip
+            or a[8] == day and (a[1] or a[2] or clean_remark(a[3]) not in ('', 'Absent', 'Fullday Ded.'))]   # today: only once it has a punch / leave / off day
+    rows = past[-max(DAYS, min(SPAN[0], MAX_SPAN)):]
     shw = min(5, max([2] + [len(a[5]) for a in rows if len(a) > 5]) + 1) if SHOW_SHIFT else 0     # Shift column width (0 = hidden)
     otw = 6 if SHOW_OT else 0                                                  # Overtime column width (0 = hidden)
     space = COLS - (7 + shw + 12 + otw)                                        # room left for Remarks on the same line
@@ -1441,11 +1444,6 @@ def slip(uid, ts):
         sc = (a[5] if len(a) > 5 else '')
         ot = (a[7] if len(a) > 7 else '')
         rem = (a[6] if len(a) > 6 else clean_remark(a[3])) or (a[4] if a[1] or a[2] else '')   # leave type, else L/E/H flags
-        if len(a) > 8 and a[8] > f'{ts:%Y-%m-%d}' and not a[1] and not a[2] and rem in RED_REMARKS:
-            rem = ''                                  # a day that has not come yet is never shown as Absent / Fullday Ded.
-        if len(a) > 8 and a[8] > f'{ts:%Y-%m-%d}' and not a[1] and not a[2] and not rem:      # coming day: date + shift only
-            o.append((f'{a[0]:<7}' + (f'{sc[:shw - 1]:<{shw}}' if shw else '')).rstrip())
-            continue
         if not a[1] and not a[2] and rem:       # no punches (Off Day, Absent, leave ...): date + shift + remark only, no '-- --'
             base = f'{a[0]:<7}' + (f'{sc[:shw - 1]:<{shw}}' if shw else '')
             o += [base + rem] if len(base) + len(rem) <= COLS else [base.rstrip(), '  ' + rem[:COLS - 2]]
@@ -1478,25 +1476,40 @@ def printer_problem(h):
     return ', '.join(bad), info['cJobs']
 
 
+def _create_dc(pname):
+    """Windows handle of a printer device context with this user's Printing preferences (ctypes: no extra module needed in the exe)."""
+    import ctypes
+    from ctypes import wintypes as w
+    spool, gdi = ctypes.WinDLL('winspool.drv', use_last_error=True), ctypes.WinDLL('gdi32', use_last_error=True)
+    spool.OpenPrinterW.argtypes = [w.LPCWSTR, ctypes.POINTER(w.HANDLE), ctypes.c_void_p]
+    spool.ClosePrinter.argtypes = [w.HANDLE]
+    spool.DocumentPropertiesW.argtypes = [w.HWND, w.HANDLE, w.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p, w.DWORD]
+    spool.DocumentPropertiesW.restype = w.LONG
+    gdi.CreateDCW.argtypes = [w.LPCWSTR, w.LPCWSTR, w.LPCWSTR, ctypes.c_void_p]
+    gdi.CreateDCW.restype = ctypes.c_void_p
+    h = w.HANDLE()
+    if not spool.OpenPrinterW(pname, ctypes.byref(h), None):
+        raise OSError('printer could not be opened')
+    try:
+        need = spool.DocumentPropertiesW(None, h, pname, None, None, 0)                 # size of the page setup
+        if need <= 0:
+            raise OSError('page setup not available')
+        mode = ctypes.create_string_buffer(need)
+        if spool.DocumentPropertiesW(None, h, pname, mode, None, 2) < 0:                # 2 = DM_OUT_BUFFER: copy it
+            raise OSError('page setup could not be read')
+    finally:
+        spool.ClosePrinter(h)
+    hdc = gdi.CreateDCW('WINSPOOL', pname, None, mode)
+    if not hdc:
+        raise OSError('device context could not be created')
+    return hdc
+
+
 def _printer_dc(pname):
     """Device context that uses the page setup saved in Windows for this printer (paper size, orientation, tray, both sides ...)."""
-    import win32print, win32ui
+    import win32ui
     try:
-        import win32gui
-        h = win32print.OpenPrinter(pname)
-        try:
-            mode = None
-            for level in (9, 8, 2):                       # this user's Printing preferences, else the printer's defaults
-                try:
-                    mode = win32print.GetPrinter(h, level)['pDevMode']
-                except Exception:
-                    mode = None
-                if mode:
-                    break
-        finally:
-            win32print.ClosePrinter(h)
-        if mode:
-            return win32ui.CreateDCFromHandle(win32gui.CreateDC('WINSPOOL', pname, mode))
+        return win32ui.CreateDCFromHandle(_create_dc(pname))
     except Exception as ex:
         print('  Printer page setup not read, using the driver default:', ex)
     dc = win32ui.CreateDC()
@@ -1789,6 +1802,75 @@ def start_web(port, key, clear=20):
     print(f'Web LCD running on port {port}')
 
 
+POLL_SECONDS = 1.5          # how often the machine is asked for new punches
+CMD_ATTLOG = 13             # ZK command: read the attendance log
+
+
+class Punch:
+    def __init__(self, user_id, timestamp, punch):
+        self.user_id, self.timestamp, self.punch = user_id, timestamp, punch
+
+
+def _zk_time(raw):
+    """4 byte ZK time -> datetime."""
+    t = int.from_bytes(raw, 'little')
+    t, sec = divmod(t, 60); t, mi = divmod(t, 60); t, hr = divmod(t, 24); t, d = divmod(t, 31); y, mo = divmod(t, 12)
+    return datetime(y + 2000, mo + 1, d + 1, hr, mi, sec)
+
+
+def parse_attlog(blob, records, new, users=None):
+    """The last `new` records of a raw attendance log (4 byte size + records of 8, 16 or 40 bytes). Only these are decoded, so a big log stays fast.
+    `users` = function returning {internal number: employee id}, needed for the old 8 byte format only."""
+    if len(blob) < 4 or records <= 0:
+        return []
+    size = int.from_bytes(blob[:4], 'little') // records
+    if size not in (8, 16):
+        size = 40
+    data = blob[4:]
+    count = len(data) // size
+    names, out = None, []
+    for i in range(max(0, count - new), count):
+        r = data[i * size:(i + 1) * size]
+        try:
+            if size == 8:
+                uid, when, punch = int.from_bytes(r[:2], 'little'), r[3:7], r[7]
+                if names is None:
+                    names = users() if users else {}
+                user = names.get(uid, str(uid))
+            elif size == 16:
+                user, when, punch = str(int.from_bytes(r[:4], 'little')), r[4:8], r[9]
+            else:
+                user, when, punch = r[2:26].split(b'\x00')[0].decode(errors='ignore'), r[27:31], r[31]
+            out.append(Punch(user, _zk_time(when), punch))
+        except ValueError as ex:
+            print('  Unreadable punch record skipped:', ex)
+    return out
+
+
+def new_punches(conn, tag=''):
+    """Yield every punch made on the machine from now on. The machine's record counter is checked every POLL_SECONDS; when it has grown,
+    the new records are read from its attendance log. (The 'live capture' of pyzk is not used: with several firmwares it stays connected but delivers nothing.)"""
+    conn.read_sizes()
+    known = conn.records
+    print(f'{tag}Device connected - {known} records in the machine, waiting for punches...')
+    while not STOP.wait(POLL_SECONDS):
+        conn.read_sizes()                                   # raises when the connection is lost: live() then reconnects
+        n = conn.records
+        if n <= known:
+            known = n                                       # (smaller: the machine's log was cleared)
+            continue
+        t0 = time.time()
+        blob = conn.read_with_buffer(CMD_ATTLOG)[0]
+        total = int.from_bytes(blob[:4], 'little')
+        conn.read_sizes()
+        now = max(n, conn.records)                          # punches may arrive while the log is being read
+        have = next((c for c in range(now, n - 1, -1) if c and total % c == 0 and total // c in (8, 16, 40)), n)    # records really inside this download
+        found = parse_attlog(blob, have, have - known, lambda: {u.uid: u.user_id for u in conn.get_users()})
+        known = have
+        print(f'{tag}{len(found)} new punch(es) read from the machine in {time.time() - t0:.1f} s')
+        yield from found
+
+
 def live(dev=None):
     """Listen to ONE attendance machine (dev = {'name', 'ip', 'port', 'key', 'printer_ip', 'printer_name'}); the window app starts one live() thread per machine."""
     from zk import ZK
@@ -1807,12 +1889,9 @@ def live(dev=None):
         try:
             conn = ZK(ip, port=port, timeout=10, password=key).connect()
             connected(True)
-            print(f'{tag}Device connected - waiting for punches...')
-            for att in conn.live_capture():
+            for att in new_punches(conn, tag):
                 if STOP.is_set():
                     break
-                if att is None:
-                    continue
                 uid = eid(ID_MAP.get(str(att.user_id), str(att.user_id)))
                 if PREVIEW_ONLY:                                          # preview mode: both slips are only shown on the dashboard / LCD; the Print slip buttons print them
                     if time.time() - last.get((uid, 'p'), 0) < REPEAT['att']:
@@ -1875,7 +1954,7 @@ def live(dev=None):
                         print(f'{tag}  Printer error:', ex)
                         hook(uid, text, 'err', str(ex))
             try:
-                conn.end_live_capture(); conn.disconnect()
+                conn.disconnect()
             except Exception:
                 pass
             connected(False)

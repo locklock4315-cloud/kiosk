@@ -31,6 +31,8 @@ PORTAL = {'site': 'https://bpo.mydecibel.com/',     # Decibel portal the extensi
 PRINT_MODE = 'raw'                                  # 'raw' = ESC/POS thermal printer | 'text' = normal text via the Windows driver (any printer)
 PRINTER_NAME = ''                                  # USB / Windows printer name; empty = use the network IP above
 SALARY_PUNCH_STATE = 4                              # punch state (the machine's function key) that prints the SALARY slip
+BOTH_PUNCH_STATE = 5                                # punch state that prints BOTH slips on ONE page: Attendance slip (left) + Salary slip (right), each in its own box (None = off)
+PAIR_FRAME = True                                   # draw a box around each slip on the BOTH_PUNCH_STATE page
 ATTENDANCE_PUNCH_STATES = None                      # None = every other state (3, 0, 1 ...) prints the attendance + leave balance slip; {3} = only state 3 does (others are ignored)
 PREVIEW_ONLY = False                                # True (set by the window app, password protected): a punch only shows the attendance + salary slip, nothing prints
 PAGE_FONT_PT, PAGE_MARGIN_IN = 12, 0.5                  # text printing on a wide page (A4 / Letter on a Windows printer): font size and margin; narrow rolls use 9 pt and no margin
@@ -1586,9 +1588,10 @@ def pair_mode(printer_ip=None, printer_name=None):
     return bool(name) and is_page_printer(name)
 
 
-def gdi_print_pair(att, sal, pname=None):
+def gdi_print_pair(att, sal, pname=None, frame=False):
     """ONE page of the printer's paper: attendance slip on the left, salary slip on the right (either may be None: the other one is printed alone).
-    The font is as big as fits (max PAGE_FONT_PT). Paper too small for both side by side (font under MIN_FONT_PT): one page each."""
+    frame=True: each slip sits in its own box (Attendance SLIP | Salary SLIP). The font is as big as fits (max PAGE_FONT_PT).
+    Paper too small for both side by side (font under MIN_FONT_PT): one page each."""
     import win32ui
     texts = [t for t in (att, sal) if t]
     if len(texts) < 2:
@@ -1600,16 +1603,19 @@ def gdi_print_pair(att, sal, pname=None):
         width, height, dpi, wide, mx, my = _page(dc)
         cut = [t.rstrip('\n').split('\n') for t in texts]
         widths = [max(COLS, max(len(ln.rstrip()) for ln in c)) for c in cut]
-        gap = 4
-        fit = min((width - 2 * mx) / ((sum(widths) + gap) * 0.6), (height - 2 * my) / (max(_units(c) for c in cut) * 1.17), dpi * PAGE_FONT_PT / 72)
+        extra, gap = (2, 2) if frame else (0, 4)                      # frame: 1 character of padding inside each box, 2 characters between the boxes
+        rows = max(_units(c) for c in cut) + (1 if frame else 0)      # frame: one blank line of padding in the box (half above, half below)
+        fit = min((width - 2 * mx) / ((sum(widths) + extra * len(widths) + gap * (len(widths) - 1)) * 0.6), (height - 2 * my) / (rows * 1.17), dpi * PAGE_FONT_PT / 72)
         if fit >= dpi * MIN_FONT_PT / 72:
             em = int(fit)
             fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', int(em * 1.5), 700))}
             step = int(em * 1.15)
+            ch = em * 0.6                                             # width of one character
             dc.StartDoc('Attendance + salary slip')
             dc.StartPage()
             for i, col in enumerate(cut):
-                x, y = mx + int((sum(widths[:i]) + gap * i) * 0.6 * em), my
+                bx = mx + int((sum(widths[:i]) + (extra + gap) * i) * ch)           # left edge of this slip's box
+                x, y = bx + int(extra / 2 * ch), my + (step // 2 if frame else 0)
                 for line in col:
                     line = line.rstrip()
                     k = 'big' if is_big(line) else 'b' if is_bold(line) else 'n'
@@ -1619,6 +1625,10 @@ def gdi_print_pair(att, sal, pname=None):
                     dc.SelectObject(fonts[k])
                     dc.SetTextColor(0x0000FF if PRINT_RED and is_red(line) else 0)
                     dc.TextOut(x, y, line); y += h
+                if frame:                                            # box around the slip (same height for both)
+                    bw, bh = int((widths[i] + extra) * ch), int(rows * step)
+                    dc.SetTextColor(0)
+                    dc.MoveTo((bx, my)); dc.LineTo((bx + bw, my)); dc.LineTo((bx + bw, my + bh)); dc.LineTo((bx, my + bh)); dc.LineTo((bx, my))
             dc.EndPage()
             dc.EndDoc()
             return
@@ -1628,7 +1638,7 @@ def gdi_print_pair(att, sal, pname=None):
         gdi_print(t, pname)
 
 
-def print_pair(att, sal, printer_ip=None, printer_name=None):
+def print_pair(att, sal, printer_ip=None, printer_name=None, frame=False):
     """Attendance + salary slip on one page of a Windows printer (see pair_mode)."""
     import win32print
     pname = printer_name or PRINTER_NAME
@@ -1637,7 +1647,7 @@ def print_pair(att, sal, printer_ip=None, printer_name=None):
         bad, jobs = printer_problem(h)
         if bad:
             raise RuntimeError(f'Printer "{pname}" is {bad}. Fix it in Windows (Settings > Printers & scanners)')
-        gdi_print_pair(att, sal, pname)
+        gdi_print_pair(att, sal, pname, frame)
         print(f'  Windows print queue: {win32print.GetPrinter(h, 2)["cJobs"]} job(s) waiting')
     finally:
         win32print.ClosePrinter(h)
@@ -1690,6 +1700,9 @@ def _latest(uid, text, state, machine):
     elif state == 'sshow':     d.update(att=None, sal=text, status='Printing...', msg='')
     elif state == 'snotfound': d.update(att=None, sal=None, status='', msg=snf)
     elif state == 'pshow':     d.update(att=text[0], sal=text[1], status='Preview only', msg='' if text[0] or text[1] else nf)
+    elif state == 'bshow':     d.update(att=text[0], sal=text[1], status='Printing...', msg='' if text[0] or text[1] else nf)
+    elif state == 'bok':       d['status'] = 'Printed'
+    elif state == 'berr':      d['status'] = 'Print failed'
     elif state in ('ok', 'sok'):   d['status'] = 'Printed'
     elif state in ('err', 'serr'): d['status'] = 'Print failed'
     else:
@@ -1904,6 +1917,34 @@ def live(dev=None):
                     hook(uid, (slip(uid, att.timestamp), salary_text(uid)), 'pshow', '')
                     continue
                 punch = getattr(att, 'punch', None)                      # punch state set on the machine: 0 in, 1 out, 2 break out, 3 break in, 4 OT in, 5 OT out
+                if BOTH_PUNCH_STATE is not None and punch == BOTH_PUNCH_STATE:   # BOTH slips: attendance (left) + salary (right) on ONE page
+                    if time.time() - last.get((uid, 'both'), 0) < REPEAT['att']:
+                        print(f'{tag}{att.timestamp} ID {uid}: slips already given, next one after {REPEAT["att"] // 60} minutes')
+                        continue
+                    last[(uid, 'both')] = t0 = time.time()
+                    refresh()
+                    hm = att.timestamp.strftime('%H:%M')
+                    today[uid] = [today.get(uid, [hm])[0], hm]
+                    a_txt, s_txt = slip(uid, att.timestamp), salary_text(uid)
+                    print(f'{tag}{att.timestamp} ID {uid} punch state {punch}: attendance slip {"yes" if a_txt else "NO"}, salary slip {"yes" if s_txt else "NO"}')
+                    hook(uid, (a_txt, s_txt), 'bshow', '')
+                    if a_txt or s_txt:
+                        try:
+                            if pair_mode(pip, pname):                            # page printer (A4 ...): both slips side by side on one page
+                                print_pair(a_txt, s_txt, pip, pname, frame=PAIR_FRAME)
+                            else:                                                # thermal roll: side by side is impossible, one slip after the other
+                                for t_ in (a_txt, s_txt):
+                                    if t_:
+                                        print_slip(t_, pip, pname)
+                            hook(uid, (a_txt, s_txt), 'bok', '')
+                            STATS.update(slips=STATS['slips'] + 1, printer='OK', last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  attendance + salary slip')
+                            print(f'{tag}  both slips sent to printer in {time.time() - t0:.2f} s')
+                        except Exception as ex:
+                            last.pop((uid, 'both'), None)
+                            STATS['printer'] = f'Error: {ex}'
+                            print(f'{tag}  Printer error:', ex)
+                            hook(uid, (a_txt, s_txt), 'berr', str(ex))
+                    continue
                 salary = punch == SALARY_PUNCH_STATE
                 if not salary and ATTENDANCE_PUNCH_STATES is not None and punch not in ATTENDANCE_PUNCH_STATES:
                     print(f'{tag}{att.timestamp} ID {uid}: punch state {punch} prints nothing (ignored)')

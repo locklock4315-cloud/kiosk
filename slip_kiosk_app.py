@@ -1282,6 +1282,18 @@ class LcdWindow:
             else: a.status.set(''); a.show(f'\n\n\nID {uid}\nwas not found in the reports', True)
             if s_txt: s.show(s_txt); s.status_lbl.config(fg='#555'); s.status.set('Preview only')
             else: s.status.set(''); s.show(sal_hint(uid), True)
+        elif state == 'bshow':
+            a_txt, s_txt = text
+            self.cur['att'], self.cur['sal'] = a_txt, s_txt
+            if a_txt: a.show(a_txt); a.status_lbl.config(fg='#555'); a.status.set('Printing...')
+            else: a.status.set(''); a.show(f'\n\n\nID {uid}\nwas not found in the reports', True)
+            if s_txt: s.show(s_txt); s.status_lbl.config(fg='#555'); s.status.set('Printing...')
+            else: s.status.set(''); s.show(sal_hint(uid), True)
+        elif state == 'bok':
+            for p_, w_ in ((a, 'att'), (s, 'sal')):
+                if self.cur[w_]: p_.status_lbl.config(fg=INK); p_.status.set('Printed')
+        elif state == 'berr':
+            for p_ in (a, s): p_.status_lbl.config(fg=RED); p_.status.set('Print failed')
         elif state in ('sshow', 'snotfound'):
             self.cur['att'] = None; a.clear()
             if state == 'snotfound': self.cur['sal'] = None; s.status.set(''); s.show(sal_hint(uid), True)
@@ -1313,7 +1325,7 @@ def poll():
             sb.STATS['printer'] = 'OK (manual print)'; done_print('att')
         elif kind == 'sok':
             sb.STATS['printer'] = 'OK (salary slip)'; done_print('sal')
-        elif kind == 'punch':                                   # employee punched on the machine: punch state 4 = salary slip, every other state = attendance + leave balance slip (it prints by itself)
+        elif kind == 'punch':                                   # employee punched on the machine: punch state 5 = both slips on one page, punch state 4 = salary slip, every other state = attendance + leave balance slip (it prints by itself)
             uid, text, state, err, mach = info
             cur_mach[0], shown_at[0] = mach, time.time()
             if mach in lcds: lcds[mach].handle(uid, text, state, err)      # this machine's own LCD screen
@@ -1332,6 +1344,20 @@ def poll():
                 else: att.status.set(''); att.show(f'\n\n\nID {uid}\nwas not found in the reports', True)
                 if s_txt: sal.show(s_txt); sal.status_lbl.config(fg='#555'); sal.status.set('Preview only')
                 else: sal.status.set(''); sal.show(sal_hint(uid), True)
+            elif state == 'bshow':                              # punch state 5: attendance slip + salary slip, both shown and printed on one page
+                a_txt, s_txt = text
+                printed.update(att=False, sal=False)
+                cur_slip[0], cur_sal[0] = a_txt, s_txt
+                if a_txt: att.show(a_txt); att.status_lbl.config(fg='#555'); att.status.set('Printing...')
+                else: att.status.set(''); att.show(f'\n\n\nID {uid}\nwas not found in the reports', True)
+                if s_txt: sal.show(s_txt); sal.status_lbl.config(fg='#555'); sal.status.set('Printing...')
+                else: sal.status.set(''); sal.show(sal_hint(uid), True)
+            elif state == 'bok':
+                for p_, w_ in ((att, 'att'), (sal, 'sal')):
+                    if (cur_slip[0] if w_ == 'att' else cur_sal[0]): p_.status_lbl.config(fg=INK); p_.status.set('Printed')
+                sb.STATS['printer'] = 'OK (attendance + salary slip)'
+            elif state == 'berr':
+                for p_ in (att, sal): p_.status_lbl.config(fg=RED); p_.status.set('Print failed')
             elif state in ('sshow', 'snotfound'):               # salary punch: only the salary slip is shown / printed
                 cur_slip[0] = None; att.clear(); printed.update(att=False, sal=False)
                 if state == 'snotfound': cur_sal[0] = None; sal.status.set(''); sal.show(sal_hint(uid), True)

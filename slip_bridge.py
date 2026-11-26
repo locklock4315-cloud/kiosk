@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 DEVICE_IP, DEVICE_PORT, COMM_KEY = '192.168.1.201', 4370, 0
 PRINTER_IP, PRINTER_PORT = '192.168.1.250', 9100   # network thermal printer (raw ESC/POS)
 COLS, DAYS = 32, 30                                 # 57 mm paper: 32 | 80 mm paper: 40 | A4: 48
-DUPLICATE_SECONDS = 600                             # same person ignored for 10 minutes
+REPEAT = {'att': 600, 'sal': 600}                   # seconds before the same person gets the same slip again (0 = every punch); set by the window app
 SOURCE_DIR = ''                                     # source folder the downloaded reports are copied from (checked every 5 s); the window app sets it to the 'source' folder next to the exe
 REPORT_NAMES = {'WH': 'WH Report', 'LB': 'LB Report'}   # the browser extension saves its downloads under these names (any extension), replacing the old file every 5 min
 REFRESH_MIN = 5                                     # the extension re-downloads WH + LB every 5 minutes
@@ -34,6 +34,8 @@ SALARY_PUNCH_STATE = 4                              # punch state (the machine's
 ATTENDANCE_PUNCH_STATES = None                      # None = every other state (3, 0, 1 ...) prints the attendance + leave balance slip; {3} = only state 3 does (others are ignored)
 PREVIEW_ONLY = False                                # True (set by the window app, password protected): a punch only shows the attendance + salary slip, nothing prints
 PAGE_FONT_PT, PAGE_MARGIN_IN = 12, 0.5                  # text printing on a wide page (A4 / Letter on a Windows printer): font size and margin; narrow rolls use 9 pt and no margin
+MIN_FONT_PT = 6                                     # page printers: smallest font used to fit a slip on one page
+ROLL_MAX_IN = 3.5                                   # printable width above this (inches) = page printer (A4, Letter, A5 ...), else thermal roll
 PRINT_RED = True                                    # Absent / Fullday Ded. lines in red: two-colour ESC/POS paper, or colour on a Windows driver (a one-colour printer just prints black). False = never send the colour command
 MACHINES = []                                       # set by the window app: [{'name', 'ip', 'port', 'key', 'printer_ip'}] one entry per attendance machine; each runs live() in its own thread
 ID_MAP = {}                                         # only if device IDs differ: {'1': '401708'}
@@ -640,7 +642,7 @@ def load():
     _last_span[0] = (rows[-1][0] - rows[0][0]).days + 1 if rows else 0
     for dt, emp, n, i, o, r, sh, ot in rows:
         uid = eid(emp)
-        d.setdefault(uid, {'n': n, 'att': [], 'lv': {}})['att'].append([dt.strftime('%d-%b'), hm(i), hm(o), r, flags(r), shift_code(sh), clean_remark(r), fmt_ot(ot)])
+        d.setdefault(uid, {'n': n, 'att': [], 'lv': {}})['att'].append([dt.strftime('%d-%b'), hm(i), hm(o), r, flags(r), shift_code(sh), clean_remark(r), fmt_ot(ot), dt.strftime('%Y-%m-%d')])
     if dups:
         print(f'Warning: {len(dups)} duplicate employee IDs after removing letters, e.g. {dups[:3]} (the last one is used)')
     return d
@@ -666,7 +668,7 @@ def refresh():
         s = sig()
         if s == SIG or s == BAD:
             return
-        key = s + [['v', 11]]                              # bump v when the parsing rules change
+        key = s + [['v', 12]]                              # bump v when the parsing rules change
         try:
             c = json.load(open(CACHE, encoding='utf-8'))
             d, span = (c['data'], c.get('span', 0)) if c['sig'] == key else (None, 0)
@@ -831,7 +833,7 @@ def sync_reports():
 DL = {'on': False, 'minutes': 5, 'user': '', 'pw': '', 'force': False, 'running': False, 'last': '-', 'next': '-', 'result': 'Auto-download not run yet'}
 DL_ERR = {'WH': '', 'LB': ''}
 DL_INFO = {'WH': '', 'LB': ''}                                             # what was asked from Decibel in the last download (shown in the window)
-CLIENT_WORD, STATUS_WORD, CYCLE_DAY = 'service tyre', 'in service', 26     # client name to pick, service status to pick, the WH period runs from the 26th to the 25th
+CLIENT_WORD, STATUS_WORD, CYCLE_DAY = 'service tyre', 'in service', 26     # client name to pick, service status to pick, the WH period starts on the 26th of last month
 DEBUG_PAGE = 'download_debug.html'                                          # the last page the site sent when a download failed (open it to see why)
 
 
@@ -960,10 +962,11 @@ class _Session:
 
 
 def _wh_dates(today=None):
-    """From = the 26th that started the current cycle, To = TODAY (the present day, every download), e.g. 14 Nov -> 26 Oct .. 14 Nov, 26 Nov -> 26 Nov .. 26 Nov."""
+    """From = the 26th of LAST month, To = the last day of the CURRENT month (28 / 29 / 30 / 31), e.g. any day of Nov -> 26 Oct .. 30 Nov."""
     t = (today or datetime.now()).date()
-    start = t.replace(day=CYCLE_DAY) if t.day >= CYCLE_DAY else (t.replace(day=1) - timedelta(days=1)).replace(day=CYCLE_DAY)
-    return start, t
+    start = (t.replace(day=1) - timedelta(days=1)).replace(day=CYCLE_DAY)
+    end = (t.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return start, end
 
 
 def _debug(page, why):
@@ -1438,6 +1441,11 @@ def slip(uid, ts):
         sc = (a[5] if len(a) > 5 else '')
         ot = (a[7] if len(a) > 7 else '')
         rem = (a[6] if len(a) > 6 else clean_remark(a[3])) or (a[4] if a[1] or a[2] else '')   # leave type, else L/E/H flags
+        if len(a) > 8 and a[8] > f'{ts:%Y-%m-%d}' and not a[1] and not a[2] and rem in RED_REMARKS:
+            rem = ''                                  # a day that has not come yet is never shown as Absent / Fullday Ded.
+        if len(a) > 8 and a[8] > f'{ts:%Y-%m-%d}' and not a[1] and not a[2] and not rem:      # coming day: date + shift only
+            o.append((f'{a[0]:<7}' + (f'{sc[:shw - 1]:<{shw}}' if shw else '')).rstrip())
+            continue
         if not a[1] and not a[2] and rem:       # no punches (Off Day, Absent, leave ...): date + shift + remark only, no '-- --'
             base = f'{a[0]:<7}' + (f'{sc[:shw - 1]:<{shw}}' if shw else '')
             o += [base + rem] if len(base) + len(rem) <= COLS else [base.rstrip(), '  ' + rem[:COLS - 2]]
@@ -1470,29 +1478,85 @@ def printer_problem(h):
     return ', '.join(bad), info['cJobs']
 
 
-def gdi_print(text, pname=None):
-    """Print as normal text through the Windows printer driver (works on any installed printer). Thermal rolls: 9 pt from the left edge;
-    a wide page (A4 / Letter): bigger font, margins, and the slip is kept as one block on the page (a long slip continues on the next page)."""
-    import win32con, win32ui
-    dc = win32ui.CreateDC()
-    dc.CreatePrinterDC(pname or PRINTER_NAME)
+def _printer_dc(pname):
+    """Device context that uses the page setup saved in Windows for this printer (paper size, orientation, tray, both sides ...)."""
+    import win32print, win32ui
     try:
-        width, height, dpi = dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES), dc.GetDeviceCaps(win32con.LOGPIXELSY)
-        dpx = dc.GetDeviceCaps(win32con.LOGPIXELSX) or dpi
-        wide = width / dpx > 5                                    # wider than 5 inch printable = A4 / Letter, not a thermal roll
-        mx, my = (int(dpx * PAGE_MARGIN_IN), int(dpi * PAGE_MARGIN_IN)) if wide else (0, 0)
-        cols = max(COLS, max((len(ln.rstrip()) for ln in text.split('\n')), default=0))   # widest line, so nothing is cut off
-        pt = PAGE_FONT_PT if wide else 9
-        em = int(min((width - 2 * mx) / (cols * 0.6), dpi * pt / 72))                     # chosen size, or smaller so every character fits the width
+        import win32gui
+        h = win32print.OpenPrinter(pname)
+        try:
+            mode = None
+            for level in (9, 8, 2):                       # this user's Printing preferences, else the printer's defaults
+                try:
+                    mode = win32print.GetPrinter(h, level)['pDevMode']
+                except Exception:
+                    mode = None
+                if mode:
+                    break
+        finally:
+            win32print.ClosePrinter(h)
+        if mode:
+            return win32ui.CreateDCFromHandle(win32gui.CreateDC('WINSPOOL', pname, mode))
+    except Exception as ex:
+        print('  Printer page setup not read, using the driver default:', ex)
+    dc = win32ui.CreateDC()
+    dc.CreatePrinterDC(pname)
+    return dc
+
+
+def _page(dc):
+    """-> (printable width, height, vertical dpi, is a page printer, side margin, top margin) of the chosen paper."""
+    import win32con
+    width, height, dpi = dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES), dc.GetDeviceCaps(win32con.LOGPIXELSY)
+    dpx = dc.GetDeviceCaps(win32con.LOGPIXELSX) or dpi
+    wide = width / dpx > ROLL_MAX_IN
+    mx = min(int(dpx * PAGE_MARGIN_IN), width // 20) if wide else 0          # small paper (A5, A6) gets smaller margins
+    my = min(int(dpi * PAGE_MARGIN_IN), height // 20) if wide else 0
+    return width, height, dpi, wide, mx, my
+
+
+def is_page_printer(pname):
+    """True when the Windows printer is set to page paper (A4, Letter ...), False for a thermal roll. Unknown: follows the 'normal text' setting."""
+    try:
+        dc = _printer_dc(pname)
+        try:
+            return _page(dc)[3]
+        finally:
+            dc.DeleteDC()
+    except Exception:
+        return PRINT_MODE == 'text'
+
+
+def _units(lines):
+    """Height of a slip in normal lines (the big NET SALARY line counts 1.5)."""
+    return sum(1.5 if is_big(ln) else 1 for ln in lines)
+
+
+def gdi_print(text, pname=None):
+    """Print as normal text through the Windows printer driver (works on any installed printer), following the printer's page setup.
+    Page paper: the font is sized so the slip fits on one page (max PAGE_FONT_PT; below MIN_FONT_PT it continues on the next page).
+    Thermal rolls: 9 pt from the left edge."""
+    import win32ui
+    dc = _printer_dc(pname or PRINTER_NAME)
+    try:
+        width, height, dpi, wide, mx, my = _page(dc)
+        lines = text.rstrip('\n').split('\n')
+        cols = max(COLS, max(len(ln.rstrip()) for ln in lines))                  # widest line, so nothing is cut off
+        across = (width - 2 * mx) / (cols * 0.6)
+        if wide:
+            down = (height - 2 * my) / (_units(lines) * 1.17)
+            em = int(min(across, dpi * PAGE_FONT_PT / 72, max(down, dpi * MIN_FONT_PT / 72)))
+        else:
+            em = int(min(across, dpi * 9 / 72))
         fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', em * 2 if not wide else int(em * 1.5), 700))}
         step, y = int(em * 1.15), my
         limit = height - my
         dc.StartDoc('Attendance slip')
         dc.StartPage()
-        for line in text.split('\n'):
+        for line in lines:
             k = 'big' if is_big(line) else 'b' if is_bold(line) else 'n'
             h = (step * 2 if not wide else int(step * 1.5)) if k == 'big' else step
-            if y + h > limit:
+            if y + h > limit and y > my:
                 dc.EndPage(); dc.StartPage(); y = my
             dc.SelectObject(fonts[k])
             dc.SetTextColor(0x0000FF if PRINT_RED and is_red(line) else 0)      # COLORREF is BGR: 0x0000FF = red
@@ -1504,55 +1568,51 @@ def gdi_print(text, pname=None):
 
 
 def pair_mode(printer_ip=None, printer_name=None):
-    """True when a slip goes to a Windows / USB printer in normal-text mode (office printer, A4): attendance + salary slip then share ONE page."""
-    return PRINT_MODE == 'text' and bool(printer_name or (not printer_ip and PRINTER_NAME))
+    """True when a slip goes to a page printer (A4, Letter ...) installed in Windows: attendance + salary slip then share ONE page."""
+    name = printer_name or ('' if printer_ip else PRINTER_NAME)
+    return bool(name) and is_page_printer(name)
 
 
 def gdi_print_pair(att, sal, pname=None):
-    """ONE page: attendance slip on the left, salary slip on the right (either may be None: the other one is printed alone, on the left).
-    The font is as big as fits (max PAGE_FONT_PT); a slip that is too long for the page continues on the next page, both columns together."""
-    import win32con, win32ui
+    """ONE page of the printer's paper: attendance slip on the left, salary slip on the right (either may be None: the other one is printed alone).
+    The font is as big as fits (max PAGE_FONT_PT). Paper too small for both side by side (font under MIN_FONT_PT): one page each."""
+    import win32ui
     texts = [t for t in (att, sal) if t]
-    if not texts:
+    if len(texts) < 2:
+        for t in texts:
+            gdi_print(t, pname)
         return
-    dc = win32ui.CreateDC()
-    dc.CreatePrinterDC(pname or PRINTER_NAME)
+    dc = _printer_dc(pname or PRINTER_NAME)
     try:
-        width, height, dpi = dc.GetDeviceCaps(win32con.HORZRES), dc.GetDeviceCaps(win32con.VERTRES), dc.GetDeviceCaps(win32con.LOGPIXELSY)
-        dpx = dc.GetDeviceCaps(win32con.LOGPIXELSX) or dpi
-        mx, my = (int(dpx * PAGE_MARGIN_IN), int(dpi * PAGE_MARGIN_IN)) if width / dpx > 5 else (0, 0)
-        widths = [max(COLS, max(len(ln.rstrip()) for ln in t.split('\n'))) for t in texts]
-        gap = 4 if len(texts) > 1 else 0
-        em = int(min((width - 2 * mx) / ((sum(widths) + gap) * 0.6), dpi * PAGE_FONT_PT / 72))
-        fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', int(em * 1.5), 700))}
-        step, limit = int(em * 1.15), height - my
-        xs = [mx + int((sum(widths[:i]) + gap * i) * 0.6 * em) for i in range(len(texts))]
-        rows = []
-        for i, t in enumerate(texts):
-            col = []
-            for line in t.split('\n'):
-                k = 'big' if is_big(line) else 'b' if is_bold(line) else 'n'
-                if k == 'big' and len(line.rstrip()) * 0.9 * em > widths[i] * 0.6 * em:
-                    k = 'b'                                      # too long for the bigger font inside its column
-                col.append((line.rstrip(), k, int(step * 1.5) if k == 'big' else step))
-            rows.append(col)
-        pos = [0] * len(rows)
-        dc.StartDoc('Attendance + salary slip')
-        while any(pos[i] < len(rows[i]) for i in range(len(rows))):
+        width, height, dpi, wide, mx, my = _page(dc)
+        cut = [t.rstrip('\n').split('\n') for t in texts]
+        widths = [max(COLS, max(len(ln.rstrip()) for ln in c)) for c in cut]
+        gap = 4
+        fit = min((width - 2 * mx) / ((sum(widths) + gap) * 0.6), (height - 2 * my) / (max(_units(c) for c in cut) * 1.17), dpi * PAGE_FONT_PT / 72)
+        if fit >= dpi * MIN_FONT_PT / 72:
+            em = int(fit)
+            fonts = {k: win32ui.CreateFont({'name': 'Courier New', 'height': -h, 'weight': w}) for k, h, w in (('n', em, 400), ('b', em, 700), ('big', int(em * 1.5), 700))}
+            step = int(em * 1.15)
+            dc.StartDoc('Attendance + salary slip')
             dc.StartPage()
-            for i, col in enumerate(rows):
-                y = my
-                while pos[i] < len(col):
-                    line, k, h = col[pos[i]]
-                    if y + h > limit and y > my:
-                        break
+            for i, col in enumerate(cut):
+                x, y = mx + int((sum(widths[:i]) + gap * i) * 0.6 * em), my
+                for line in col:
+                    line = line.rstrip()
+                    k = 'big' if is_big(line) else 'b' if is_bold(line) else 'n'
+                    h = int(step * 1.5) if k == 'big' else step
+                    if k == 'big' and len(line) * 0.9 > widths[i] * 0.6:
+                        k = 'b'                                      # too long for the bigger font inside its column
                     dc.SelectObject(fonts[k])
                     dc.SetTextColor(0x0000FF if PRINT_RED and is_red(line) else 0)
-                    dc.TextOut(xs[i], y, line); y += h; pos[i] += 1
+                    dc.TextOut(x, y, line); y += h
             dc.EndPage()
-        dc.EndDoc()
+            dc.EndDoc()
+            return
     finally:
         dc.DeleteDC()
+    for t in texts:
+        gdi_print(t, pname)
 
 
 def print_pair(att, sal, printer_ip=None, printer_name=None):
@@ -1589,7 +1649,7 @@ def print_slip(text, printer_ip=None, printer_name=None):
             bad, jobs = printer_problem(h)
             if bad:
                 raise RuntimeError(f'Printer "{pname}" is {bad}. Fix it in Windows (Settings > Printers & scanners)')
-            if PRINT_MODE == 'text':
+            if PRINT_MODE == 'text' or is_page_printer(pname):     # page printers are never sent thermal commands
                 gdi_print(text, pname)
             else:
                 win32print.StartDocPrinter(h, 1, ('Slip', None, 'RAW'))
@@ -1755,7 +1815,7 @@ def live(dev=None):
                     continue
                 uid = eid(ID_MAP.get(str(att.user_id), str(att.user_id)))
                 if PREVIEW_ONLY:                                          # preview mode: both slips are only shown on the dashboard / LCD; the Print slip buttons print them
-                    if time.time() - last.get((uid, 'p'), 0) < DUPLICATE_SECONDS:
+                    if time.time() - last.get((uid, 'p'), 0) < REPEAT['att']:
                         continue
                     last[(uid, 'p')] = time.time()
                     refresh()
@@ -1769,7 +1829,9 @@ def live(dev=None):
                 if not salary and ATTENDANCE_PUNCH_STATES is not None and punch not in ATTENDANCE_PUNCH_STATES:
                     print(f'{tag}{att.timestamp} ID {uid}: punch state {punch} prints nothing (ignored)')
                     continue
-                if time.time() - last.get((uid, salary), 0) < DUPLICATE_SECONDS:      # same person + same kind of slip only once per 10 minutes (per machine)
+                wait = REPEAT['sal' if salary else 'att']
+                if time.time() - last.get((uid, salary), 0) < wait:      # same person + same kind of slip only once per set time (per machine)
+                    print(f'{tag}{att.timestamp} ID {uid}: slip already given, next one after {wait // 60} minutes')
                     continue
                 last[(uid, salary)] = t0 = time.time()
                 if salary:
@@ -1786,6 +1848,7 @@ def live(dev=None):
                             STATS.update(slips=STATS['slips'] + 1, printer='OK', last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  salary slip')
                             print(f'{tag}  salary slip sent to printer in {time.time() - t0:.2f} s')
                         except Exception as ex:
+                            last.pop((uid, salary), None)               # not printed: the person may punch again at once
                             STATS['printer'] = f'Error: {ex}'
                             print(f'{tag}  Printer error:', ex)
                             hook(uid, text, 'serr', str(ex))
@@ -1807,6 +1870,7 @@ def live(dev=None):
                                      last=f'{att.timestamp:%H:%M:%S}  {name}  ID {uid}  {DATA[uid]["n"]}')
                         print(f'{tag}  slip sent to printer in {time.time() - t0:.2f} s')
                     except Exception as ex:
+                        last.pop((uid, salary), None)                   # not printed: the person may punch again at once
                         STATS['printer'] = f'Error: {ex}'
                         print(f'{tag}  Printer error:', ex)
                         hook(uid, text, 'err', str(ex))

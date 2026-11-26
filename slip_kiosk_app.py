@@ -982,7 +982,7 @@ for r, row in enumerate(KP):
         pad.columnconfigure(c, weight=1, uniform='k')
         cmd = clear if t == 'Clear' else enter if t == 'Enter' else (lambda d=t: key(d))
         look = {'Clear': dict(fg=INK, bg='#e8e8e8', hv='#dcdcdc', pr='#c9c9c9', pf=INK),
-                'Enter': dict(fg='white', bg=PRIMARY, hv=PRIMARY_D, pr='#82030a', pf='white')}.get(t, dict(fg=NAVY, bg='#f4f4f4', hv='#ebebeb', pr='#d2d2d2', pf=NAVY))
+                'Enter': dict(fg='#ffffff', bg=PRIMARY, hv=PRIMARY_D, pr='#82030a', pf='#ffffff')}.get(t, dict(fg=NAVY, bg='#f4f4f4', hv='#ebebeb', pr='#d2d2d2', pf=NAVY))
         b = tk.Button(pad, text=t, command=cmd, font=('Segoe UI', 16 if len(t) == 1 else 11, 'bold'), relief='flat', bd=0, fg=look['fg'],
                       bg=look['bg'], activebackground=look['pr'], activeforeground=look['pf'], takefocus=0, cursor='hand2')
         b.grid(row=r, column=c, sticky='nsew', padx=3, pady=3)

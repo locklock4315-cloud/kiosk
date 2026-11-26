@@ -56,7 +56,7 @@ except Exception:
 
 DEFAULT_MACHINES = [{'on': True, 'name': f'Machine {i}', 'ip': f'192.168.1.{100 + i}', 'port': '4370', 'key': '0', 'pip': '', 'screen': 0} for i in range(1, 6)]
 cfg = {'device_ip': '192.168.1.201', 'device_port': '4370', 'comm_key': '0', 'printer_ip': '192.168.1.250',
-       'paper': '57', 'days': '30', 'mode': 'network', 'printer_name': '', 'source_dir': '', 'dl_on': True, 'dl_min': '5', 'dc_site': 'https://bpo.mydecibel.com/', 'dc_user': 'ST.404473', 'dc_pass': 'Ahmed!@4190', 'plain': False, 'autorun': False, 'preview_only': False, 'show_keypad': False,
+       'paper': '57', 'days': '30', 'att_repeat': '10', 'sal_repeat': '10', 'mode': 'network', 'printer_name': '', 'source_dir': '', 'dl_on': True, 'dl_min': '5', 'dc_site': 'https://bpo.mydecibel.com/', 'dc_user': 'ST.404473', 'dc_pass': 'Ahmed!@4190', 'plain': False, 'autorun': False, 'preview_only': False, 'show_keypad': False,
        'machines': DEFAULT_MACHINES, 'lcd_web': False, 'lcd_port': '8080', 'lcd_clear': '20', 'preview_clear': '30', 'lcd_key': ''}
 if os.path.exists(CFG):
     cfg.update(json.load(open(CFG)))
@@ -266,7 +266,7 @@ _l, _t, _r, _b = _work_area(); _sw, _sh = _r - _l, _b - _t
 _w, _h = min(1240, _sw - 24), min(820, _sh - 60)       # 60 px = title bar + window borders
 root.geometry(f'{_w}x{_h}+{_l + (_sw - _w) // 2}+{_t + max(0, (_sh - _h - 50) // 3)}'); root.minsize(min(980, _w), min(600, _h)); root.after(300, root.focus_force)
 root.protocol('WM_DELETE_WINDOW', lambda: root.iconify())   # X button minimizes to taskbar, never closes
-v = {k: tk.StringVar(value=str(cfg[k])) for k in ('device_ip', 'device_port', 'comm_key', 'printer_ip', 'paper', 'days', 'printer_name', 'mode', 'source_dir', 'dl_min', 'dc_site', 'dc_user', 'dc_pass', 'lcd_port', 'lcd_clear')}
+v = {k: tk.StringVar(value=str(cfg[k])) for k in ('device_ip', 'device_port', 'comm_key', 'printer_ip', 'paper', 'days', 'att_repeat', 'sal_repeat', 'printer_name', 'mode', 'source_dir', 'dl_min', 'dc_site', 'dc_user', 'dc_pass', 'lcd_port', 'lcd_clear')}
 dl_on = tk.BooleanVar(value=bool(cfg['dl_on']))
 auto, plain, lcdweb = tk.BooleanVar(value=cfg['autorun']), tk.BooleanVar(value=cfg['plain']), tk.BooleanVar(value=bool(cfg['lcd_web']))
 
@@ -323,6 +323,33 @@ nb = ttk.Notebook(root); nb.pack(fill='both', expand=True, padx=8, pady=(4, 8))
 tab_dash, tab_conn, tab_mach, tab_data = (tk.Frame(nb, bg=BG) for _ in range(4))
 nb.add(tab_dash, text='Dashboard'); nb.add(tab_conn, text='Connectivity'); nb.add(tab_mach, text='Machines'); nb.add(tab_data, text='Data')
 
+# ---- Data tab is taller than a small screen: scrollbar + mouse wheel. Everything of this tab goes into data_page.
+data_cv = tk.Canvas(tab_data, bg=BG, highlightthickness=0, bd=0, yscrollincrement=20)
+data_sc = ttk.Scrollbar(tab_data, orient='vertical', command=data_cv.yview)
+data_sc.pack(side='right', fill='y'); data_cv.pack(side='left', fill='both', expand=True)
+data_cv.config(yscrollcommand=data_sc.set)
+data_page = tk.Frame(data_cv, bg=BG)
+data_win = data_cv.create_window(0, 0, window=data_page, anchor='nw')
+
+
+def data_resize(e=None):                              # page = as wide as the tab; scroll area = as tall as the content
+    data_cv.itemconfigure(data_win, width=data_cv.winfo_width())
+    data_cv.config(scrollregion=(0, 0, data_cv.winfo_width(), max(data_page.winfo_reqheight(), data_cv.winfo_height())))
+
+
+def data_wheel(e):
+    try:
+        w = root.winfo_containing(e.x_root, e.y_root)
+        if w is None or not str(w).startswith(str(tab_data)) or data_page.winfo_reqheight() <= data_cv.winfo_height(): return
+    except Exception:
+        return
+    up = e.num == 4 or e.delta > 0
+    data_cv.yview_scroll(-3 if up else 3, 'units')
+
+
+data_page.bind('<Configure>', data_resize); data_cv.bind('<Configure>', data_resize)
+for _ev in ('<MouseWheel>', '<Button-4>', '<Button-5>'): root.bind_all(_ev, data_wheel, add='+')
+
 # ---- overview cards
 sv = {k: tk.StringVar(value='-') for k in ('mach', 'mach_state', 'prn', 'wh', 'lb', 'emp', 'sal', 'sync', 'watch', 'slips', 'last')}
 cardlbl = {}
@@ -338,7 +365,7 @@ def card(parent, title, keys, col, wrap=200):
 
 cards_c = tk.Frame(tab_conn, bg=BG); cards_c.pack(fill='x', padx=10, pady=(12, 8))
 card(cards_c, 'Machine', ['mach', 'mach_state'], 0); card(cards_c, 'Printer', ['prn'], 1); card(cards_c, 'Activity', ['slips', 'last'], 2)
-cards_d = tk.Frame(tab_data, bg=BG); cards_d.pack(fill='x', padx=10, pady=(12, 8))
+cards_d = tk.Frame(data_page, bg=BG); cards_d.pack(fill='x', padx=10, pady=(12, 8))
 card(cards_d, 'Reports', ['wh', 'lb', 'emp', 'sal', 'sync'], 0, wrap=900)
 
 
@@ -372,12 +399,18 @@ mf, pf = box(st, 'Slip', 0), box(st, 'Printer connection (tick the one to use)',
 for i, (t, k) in enumerate([('Paper (57 / 80 mm roll or A4)', 'paper'), ('Days shown on slip', 'days')]):
     field(mf, i, t, v[k])
 mf.columnconfigure(1, weight=1)
+tk.Label(mf, text='Same slip again after (minutes, 0 = always)', bg='white', fg=MUTED, font=FN).grid(row=2, column=0, columnspan=2, sticky='w', pady=(5, 0))
+rp = tk.Frame(mf, bg='white'); rp.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(3, 0))
+for _t, _k in (('Attendance', 'att_repeat'), ('Salary', 'sal_repeat')):
+    tk.Label(rp, text=_t, bg='white', fg=INK, font=FN).pack(side='left', padx=(0, 6))
+    ttk.Entry(rp, textvariable=v[_k], width=5, justify='center').pack(side='left', padx=(0, 14))
+ttk.Button(rp, text='Save', style='Primary.TButton', command=lambda: safe_apply()).pack(side='right')
 pf.columnconfigure(1, weight=1)
 ttk.Radiobutton(pf, text='Network printer (IP)', variable=v['mode'], value='network', style='Card.TRadiobutton').grid(row=0, column=0, sticky='w', pady=5)
 ttk.Entry(pf, textvariable=v['printer_ip'], width=22).grid(row=0, column=1, sticky='ew', padx=(14, 0), pady=5)
 ttk.Radiobutton(pf, text='USB / Windows printer', variable=v['mode'], value='usb', style='Card.TRadiobutton').grid(row=1, column=0, sticky='w', pady=5)
 cb = ttk.Combobox(pf, textvariable=v['printer_name'], values=printers(), width=30, state='readonly'); cb.grid(row=1, column=1, sticky='ew', padx=(14, 0), pady=5)
-cb.bind('<<ComboboxSelected>>', lambda e: (v['mode'].set('usb'), plain.set(True)))      # a Windows printer prints normal text, attendance + salary slip on one A4 page (untick the box below for a thermal printer)
+cb.bind('<<ComboboxSelected>>', lambda e: v['mode'].set('usb'))      # page printers (A4, Letter ...) are detected by the engine and follow their Windows page setup
 ttk.Button(pf, text='Refresh', command=lambda: cb.config(values=printers())).grid(row=1, column=2, padx=(8, 0))
 def open_queue():
     n = v['printer_name'].get().strip()
@@ -386,13 +419,13 @@ def open_queue():
     subprocess.Popen(['rundll32', 'printui.dll,PrintUIEntry', '/o', '/n', n])
 
 
-ttk.Checkbutton(pf, text='Office / laser / inkjet printer (print as normal text)', variable=plain, style='Card.TCheckbutton').grid(row=2, column=0, columnspan=2, sticky='w', pady=(8, 2))
+ttk.Checkbutton(pf, text='Print as normal text (A4 / Letter: automatic)', variable=plain, style='Card.TCheckbutton').grid(row=2, column=0, columnspan=2, sticky='w', pady=(8, 2))
 ttk.Button(pf, text='Print queue', command=open_queue).grid(row=2, column=2, padx=(8, 0), pady=(8, 2))
 ttk.Checkbutton(pf, text='Start automatically with Windows', variable=auto, style='Card.TCheckbutton').grid(row=3, column=0, columnspan=2, sticky='w', pady=2)
 
 
 # ---- Data tab: linked folder
-af_o, af = make_card(tab_data, 'Reports auto-update')
+af_o, af = make_card(data_page, 'Reports auto-update')
 af_o.pack(fill='x', padx=16, pady=(0, 8))
 tk.Label(af, text=f'The app downloads the WH / LB reports from Decibel into the source folder as "{sb.REPORT_NAMES["WH"]}" / "{sb.REPORT_NAMES["LB"]}". Files you copy there yourself (name has WH or LB) are loaded too.', bg='white', fg=MUTED, font=FN, justify='left', wraplength=1100).pack(anchor='w', pady=(0, 4))
 for _lbl, _k in (('Work Hour report link', 'WH'), ('Leave Balance report link', 'LB')):
@@ -429,6 +462,12 @@ tk.Label(pc_f, text='seconds (0 = never clear)', bg='white', fg=MUTED, font=FN).
 pc_e.bind('<Return>', commit_pc); pc_e.bind('<FocusOut>', commit_pc)
 
 
+def set_repeat():                                      # minutes in the settings -> seconds in the engine
+    for k, name in (('att', 'att_repeat'), ('sal', 'sal_repeat')):
+        s = str(cfg.get(name, '10'))
+        sb.REPEAT[k] = (int(s) if s.isdigit() else 10) * 60
+
+
 def apply():
     for k in v: cfg[k] = v[k].get().strip()
     cfg['autorun'], cfg['plain'], cfg['lcd_web'] = auto.get(), plain.get(), lcdweb.get()
@@ -440,7 +479,7 @@ def apply():
     if not cfg['source_dir']: cfg['source_dir'] = SOURCE
     try: os.makedirs(cfg['source_dir'], exist_ok=True)
     except OSError: pass
-    for k in ('device_port', 'comm_key', 'days', 'lcd_port', 'lcd_clear'):
+    for k in ('device_port', 'comm_key', 'days', 'att_repeat', 'sal_repeat', 'lcd_port', 'lcd_clear'):
         if not cfg[k].isdigit(): raise ValueError(f'{k.replace("_", " ")} must be a number')
     cfg['paper'] = cfg['paper'].upper()
     if cfg['paper'] not in ('57', '58', '80', 'A4'): raise ValueError('paper must be 57, 80 or A4')
@@ -462,6 +501,7 @@ def apply():
     sb.WEB.update(on=cfg['lcd_web'], key=cfg['lcd_key'], clear=clear_secs())
     sb.PRINTER_IP, sb.PRINTER_NAME = cfg['printer_ip'], (cfg['printer_name'] if cfg['mode'] == 'usb' else '')
     sb.SOURCE_DIR = cfg['source_dir']
+    set_repeat()
     if cfg['dc_site']: sb.PORTAL['site'] = cfg['dc_site']
     sb.DL.update(on=cfg['dl_on'], minutes=int(cfg['dl_min']), user=cfg['dc_user'], pw=cfg['dc_pass'])
     sb.PRINT_MODE = 'text' if (cfg['plain'] or cfg['paper'] == 'A4') else 'raw'       # A4 = office printer: always normal text
@@ -1002,15 +1042,15 @@ lsc = ttk.Scrollbar(log_b); lsc.pack(side='right', fill='y')
 log = tk.Text(log_b, height=8, font=('Consolas', 9), bg='#111111', fg='#f2f2f2', insertbackground=PRIMARY, relief='flat', bd=0, padx=10, pady=8,
               highlightthickness=0, wrap='word', yscrollcommand=lsc.set)
 log.pack(side='left', fill='both', expand=True); lsc.config(command=log.yview)
-dc_o, dc = make_card(tab_data, 'Decibel login (editable)')
+dc_o, dc = make_card(data_page, 'Decibel login (editable)')
 dc_o.pack(fill='x', padx=16, pady=(0, 8))
 dc_row = tk.Frame(dc, bg='white'); dc_row.pack(fill='x')
 tk.Label(dc_row, text='Decibel', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(0, 8))
-ttk.Entry(dc_row, textvariable=v['dc_site'], width=30).pack(side='left', padx=(0, 16))
+ttk.Entry(dc_row, textvariable=v['dc_site'], width=24).pack(side='left', padx=(0, 16))
 tk.Label(dc_row, text='User ID', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(0, 8))
-ttk.Entry(dc_row, textvariable=v['dc_user'], width=16).pack(side='left', padx=(0, 16))
+ttk.Entry(dc_row, textvariable=v['dc_user'], width=12).pack(side='left', padx=(0, 16))
 tk.Label(dc_row, text='Password', bg='white', fg=MUTED, font=FN).pack(side='left', padx=(0, 8))
-dc_pw = ttk.Entry(dc_row, textvariable=v['dc_pass'], width=18, show='*'); dc_pw.pack(side='left', padx=(0, 6))
+dc_pw = ttk.Entry(dc_row, textvariable=v['dc_pass'], width=13, show='*'); dc_pw.pack(side='left', padx=(0, 6))
 dc_show = tk.BooleanVar(value=False)
 ttk.Checkbutton(dc_row, text='Show', variable=dc_show, style='Card.TCheckbutton', command=lambda: dc_pw.config(show='' if dc_show.get() else '*')).pack(side='left', padx=(0, 12))
 dc_msg = tk.Label(dc_row, text='', bg='white', fg=MUTED, font=FN)
@@ -1036,13 +1076,24 @@ def download_now():
 
 ttk.Button(dl_row, text='Download now', style='Primary.TButton', command=download_now).pack(side='left')
 dl_msg = tk.Label(dl_row, text='', bg='white', fg=MUTED, font=FN, anchor='w', justify='left', wraplength=520); dl_msg.pack(side='left', padx=(14, 0))
-bd_o, bar_d = make_card(tab_data, 'Manual upload')
+bd_o, bar_d = make_card(data_page, 'Manual upload')
 bd_o.pack(fill='x', padx=16, pady=(0, 8))
-tk.Label(bar_d, text='Normally not needed: just copy the WH / LB files into the reports folder. Or pick a file here (.xls, .xlsx or .csv, name must contain WH or LB; salary slips: any PDF).', bg='white', fg=MUTED, font=FN).pack(anchor='w', pady=(0, 10))
+tk.Label(bar_d, text='Normally not needed: just copy the WH / LB files into the reports folder. Or pick a file here (.xls, .xlsx or .csv, name must contain WH or LB; salary slips: any PDF).', bg='white', fg=MUTED, font=FN, justify='left', wraplength=900).pack(anchor='w', pady=(0, 10))
 btn_row = tk.Frame(bar_d, bg='white'); btn_row.pack(anchor='w')
 for t, c in [('Load WH report', lambda: load_report('WH')), ('Load LB report', lambda: load_report('LB')), ('Load salary PDF', lambda: load_salary_pdf())]:
     load_btns.append(ttk.Button(btn_row, text=t, style='Primary.TButton', command=c)); load_btns[-1].pack(side='left', padx=(0, 8))
 
+
+
+def wrap_labels(w):                                   # long help texts of the Data tab wrap to the window width (nothing cut off on small screens)
+    for c in w.winfo_children():
+        if isinstance(c, tk.Label) and int(str(c.cget('wraplength')) or 0) >= 900:
+            c.bind('<Configure>', lambda e: abs(int(str(e.widget.cget('wraplength'))) - e.width + 8) > 4 and e.widget.config(wraplength=e.width - 8))
+            c.pack_configure(fill='x')
+        wrap_labels(c)
+
+
+wrap_labels(data_page)
 
 
 # ---- Machines tab: every attendance machine with its own LCD screen (extra monitor on this PC) and/or its own web LCD page
@@ -1121,7 +1172,6 @@ def add_mrow(m=None):
     row['w'] = [ttk.Checkbutton(mach_b, variable=row['on'], style='Card.TCheckbutton')]
     for c, (k2, wd) in enumerate((('name', 14), ('ip', 16), ('port', 6), ('key', 6), ('pip', 16)), 1): row['w'].append(ttk.Entry(mach_b, textvariable=row[k2], width=wd))
     pcb = ttk.Combobox(mach_b, textvariable=row['pname'], values=[''] + list(cb['values']), width=26, state='readonly')
-    pcb.bind('<<ComboboxSelected>>', lambda e, r_=row: r_['pname'].get() and plain.set(True))      # Windows printer = normal text, both slips on one A4 page
     row['w'].append(pcb)
     row['w'].append(ttk.Combobox(mach_b, textvariable=row['screen'], values=SCREENS, width=22, state='readonly'))
     for c, w in enumerate(row['w']): w.grid(row=r, column=c, sticky='w', padx=(0, 8), pady=3)
@@ -1138,7 +1188,7 @@ mbt = tk.Frame(mach_o, bg='white'); mbt.pack(fill='x', padx=16, pady=(0, 12))
 ttk.Button(mbt, text='Save + Start', style='Primary.TButton', command=start).pack(side='left')
 ttk.Button(mbt, text='Save', command=lambda: safe_apply()).pack(side='left', padx=8)
 ttk.Button(mbt, text='Add machine', command=add_mrow).pack(side='left'); ttk.Button(mbt, text='Remove last', command=remove_mrow).pack(side='left', padx=8)
-tk.Label(mach_b, text='LCD screen: a window that covers that whole monitor and shows ONLY this machine\'s punches (Monitor 1 = the leftmost screen). Own printer (IP or Windows / USB printer): the slips of this machine print ONLY on it; leave both empty to use the printer from the Connectivity tab.',
+tk.Label(mach_b, text='LCD screen: a window that covers that whole monitor and shows ONLY this machine\'s punches (Monitor 1 = the leftmost screen). A page printer (A4, Letter ...) prints both slips by its Windows page setup. Own printer (IP or Windows / USB printer): the slips of this machine print ONLY on it; leave both empty to use the printer from the Connectivity tab.',
          bg='white', fg=MUTED, font=FN, justify='left', wraplength=900).grid(row=99, column=0, columnspan=8, sticky='w', pady=(8, 0))
 
 web_o, web_b = make_card(tab_mach, 'LCD over the network (any PC, TV or tablet with a browser, no cable to this PC needed)')
@@ -1326,6 +1376,7 @@ try: os.makedirs(cfg['source_dir'], exist_ok=True)
 except OSError: pass
 sb.DL.update(on=bool(cfg['dl_on']), minutes=int(cfg['dl_min']) if str(cfg['dl_min']).isdigit() and int(cfg['dl_min']) > 0 else 5, user=cfg['dc_user'], pw=cfg['dc_pass'])
 sb.PREVIEW_ONLY = bool(cfg.get('preview_only'))
+set_repeat()
 sb.MACHINES = machines_from_cfg()
 sb.start_watchers()                         # checks the reports folder and the linked folder every few seconds; a new file is live in about 15-30 s
 start_tray()
